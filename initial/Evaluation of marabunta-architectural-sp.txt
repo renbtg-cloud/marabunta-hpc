@@ -1,0 +1,252 @@
+Evaluation of marabunta-architectural-specification-v3.3.md
+Short verdict
+Much more coherent and technically plausible than the earlier specification. The core model — use GnuCOBOL to transpile user-selected, pragma-delimited COBOL loops, link them against a custom cambrian_cobol runtime, and optionally scatter shards across a private mesh — is a legitimate architecture for a narrow subset of batch COBOL workloads.
+
+But the document still:
+
+overclaims in licensing language,
+underspecifies the most important interfaces,
+understates the complexity of replacing libcob,
+lacks security, serialization, and failure-recovery detail,
+bases its market thesis partly on unverified pricing claims.
+Overall feasibility: moderate for a scoped MVP; low for the full product as written.
+Market potential: real but narrow, with a significant enterprise trust barrier.
+
+1. What v3.3 gets right
+The architecture has improved substantially by centering these decisions:
+
+v3.3 choice	Why it helps
+Human-verified pragmas	Avoids automatic AI rewriting of financial code
+GnuCOBOL as transpiler	Uses a mature COBOL frontend instead of writing one from scratch
+Custom cambrian_cobol runtime	Potential LGPL cleanup path
+FFI type parity rule for COMP-3	Recognizes Python/NumPy cannot natively see BCD nibbles
+LOCAL-STORAGE requirement for re-entrant subroutines	Correct COBOL-specific insight
+Pragma-level concurrency strategies	Addresses WORKING-STORAGE global-state problems
+Orthogonal ISAM partitioning and rebuild	Sensible for distributed batch
+NDJSON logging, no telemetry agents	Conservative, operational-friendly stance
+These are not hand-wavy ideas. They show real domain signal.
+
+2. Feasibility by subsystem
+2.1 cambrian_cobol runtime
+This is the single largest technical and licensing risk in the document.
+
+The spec says:
+
+GnuCOBOL transpiles COBOL to C, then GCC/Clang links the result against cambrian_cobol.
+
+That implies cambrian_cobol must reimplement the ABI and behavior that GnuCOBOL-generated C expects from libcob.
+
+That is not just COMP-3 arithmetic. Depending on the accepted COBOL subset, it may include:
+
+picture-clause semantics
+decimal alignment and source-to-destination conversion
+MOVE with truncation, padding, and type conversion
+edited numeric fields
+table/array addressing
+CALL conventions
+BY REFERENCE and BY CONTENT parameter passing
+file status mapping
+runtime initialization and program entry points
+string-like operations for PIC X fields
+A clean-room Rust/C runtime covering a deliberately small loop subset is feasible. A clean-room runtime that makes arbitrary GnuCOBOL-generated COBOL “just work” is a much larger project.
+
+The spec does not define that subset. This is the critical missing specification.
+
+2.2 Marabunta mesh
+Leaderless gossip and sharded execution are feasible but nontrivial:
+
+SWIM/gossip membership
+QUIC/stream-based data plane
+partition assignment
+work-item lifecycle
+result reconciliation
+node failure and rerouting
+Each is understood engineering, but production-grade implementations take months.
+
+The bigger gap: the shard data contract is not specified.
+
+The document says:
+
+Iteration bounds, loop indices, linkage parameters, and subset data keys are serialized into compact binary frames.
+
+But it never defines:
+
+what “subset data keys” mean
+how COBOL record arrays are split
+how output diffs are merged
+how reduction pragmas map to byte-level data
+what happens when inputs overlap
+Without this, the mesh is a plausible overview, not an implementable architecture.
+
+2.3 Python/Fortran bridges
+This is probably the most implementable part.
+
+The Fortran ISO_C_BINDING path is standard and realistic. The Python ctypes/cffi path is also realistic.
+
+However, the Python example is illustrative, not production-ready:
+
+
+Apply
+cobol_lib = ctypes.CDLL("./libinner_batch.so")
+
+def execute_region_shard(reg_idx):
+    c_index = ctypes.c_int(reg_idx)
+    cobol_lib.EXECUTE_REGION_BLOCK(ctypes.byref(c_index))
+A real GnuCOBOL-compiled shared library may:
+
+require cob_init() or runtime initialization,
+expose a different C symbol than the COBOL program ID,
+expect a specific parameter-list ABI,
+require thread/runtime state per call.
+That does not invalidate the design; it just means the bridge layer is underspecified.
+
+2.4 cambrian-scan
+As an advisory scanner that inserts draft comments, this is safe and useful.
+
+But two cautions:
+
+“Scans control flow graphs for heavy nested loops” is harder than it sounds for messy dialect-heavy COBOL.
+The spec should commit to comments only until a human activates them. It mostly does this, which is good.
+2.5 mbunta-isam data layer
+A log-structured key-value backend to emulate COBOL ISAM behavior is a reasonable idea.
+
+But COBOL file semantics are subtle:
+
+INVALID KEY
+AT END
+alternate record keys with duplicates
+record locking
+file status codes
+Replicating these against a new storage engine is possible, but it needs a conformance suite. The spec does not define one.
+
+3. Contradictions and overclaims
+Statement in spec	Assessment
+“Zero Runtime Tax”	True only if custom runtime avoids LGPL and no proprietary runtime is used. GnuCOBOL itself is free, but “zero tax” is a pricing claim, not an engineering fact.
+“statically linked native binaries”	Fine, but if cambrian_cobol is static-linked, the custom-runtime ABI must be fully self-contained. That amplifies the libcob replacement risk.
+“no metering agents, license keys”	Achievable technically, but not the primary blocker for enterprise adoption.
+“eliminate economic extraction through four pillars”	Marketing framing. True partial-avoidance claim, not a proven outcome.
+“The machine never generates calculation code”	It transpiles COBOL to C, so it does transform calculation code. The honest version: it does not invent logic you didn’t already write.
+“garbage collection pauses are structurally impossible”	Plausible for Rust/C/WASM, but GnuCOBOL-generated C can allocate; also pauses can arise from memory management elsewhere.
+“zero-copy memory mapping”	mmap is zero-copy from OS page cache into address space, but user-space consumption and processing still have costs.
+“$5.55 per core per hour”	Precise but unverified in the document. Should be sourced if this is a diligence/evaluation artifact.
+4. Licensing analysis
+This deserves its own section because the spec is deliberately built around a licensing escape hatch.
+
+I am not giving legal advice, but from an engineering-risk perspective:
+
+4.1 What is safe to say
+Using GnuCOBOL as a compiler/transpiler does not automatically GPL-license your application.
+The primary concern is what the compiled artifact links against.
+If you replace libcob with a clean-room cambrian_cobol runtime, you remove the main LGPL runtime contamination path.
+4.2 What is not safe to say
+“100% unencumbered”
+“proprietary”
+“zero license risk”
+These are stronger than the process likely supports.
+
+The tricky parts:
+
+GnuCOBOL-generated C may include GnuCOBOL-owned headers, macros, or templates.
+libcob’s API is itself someone else’s interface; reimplementing it cleanly requires disciplined separation.
+If the same engineers inspect libcob/GnuCOBOL internals and then write the Rust runtime, it may not qualify as a defensible clean-room implementation.
+WASM/WIT, Rust crates, and transitive dependencies also carry their own licenses.
+So the accurate engineering statement is:
+
+The proposed custom runtime may reduce or eliminate the LGPL runtime exposure, but only if implemented under a real clean-room process and reviewed by an open-source licensing attorney.
+
+5. What is missing from v3.3
+The document is a strong architectural vision, but it is incomplete as an implementation blueprint.
+
+Missing or underspecified:
+
+Area	Why it matters
+Loop data contract format	Without this, sharding and FFI cannot work correctly
+Public/private mesh trust model	Banks won’t send account data to anonymous peers
+Authentication and authorization	Essential for regulated workloads
+Chunk/result serialization layout	COMP-3, display numerics, EBCDIC vs ASCII boundaries
+Failure semantics	What does a partial batch result look like?
+IDEMPOTENCE	Batch jobs retry; distributed shards must be idempotent
+Audit trail	Source pragmas plus run history must be reconstructible
+Performance benchmarks	None are provided
+Supported COBOL subset	The single most important MVP boundary
+Clean-room operating procedure	Required for the licensing story
+6. Market assessment
+6.1 The pain is real
+Mainframe/licensed COBOL batch modernization is genuinely expensive. The narrative — expensive per-core runtime fees, shrinking COBOL skills, batch-window pressure — is credible.
+
+A product that:
+
+keeps original COBOL source,
+offloads selected loops,
+preserves fallback,
+does not require rewriting business logic,
+uses cheap commodity workers,
+would have a real niche.
+
+6.2 But the disruption thesis is not fully proven
+The spec makes a strong anti-Rocket/AWS argument. However:
+
+AWS Mainframe Modernization pricing is not solely Rocket runtime; it includes infrastructure and managed service.
+The quoted per-core numbers need citations.
+Enterprises don’t make core-banking decisions purely on hourly runtime cost.
+GnuCOBOL already exists; adoption has been slow because support, certification, feature gaps, and change risk matter more than license cost.
+6.3 The enterprise trust problem is the real barrier
+The hard sale is not:
+
+Will it work?
+
+It is:
+
+Can we let a small vendor touch production COBOL and run a shard on our network?
+
+The Python evaluation harness is smart because it lets technical evaluators test mesh behavior without production risk.
+
+The Fortran bridge is useful as capability signaling.
+
+But the revenue driver remains COBOL, and that will require:
+
+parity proof against the original runtime,
+a private, customer-controlled worker topology,
+rigorous failure fallback,
+one or two reference deployments with measurable batch savings.
+That is a long, service-heavy sales motion, not a self-serve product launch.
+
+6.4 Competitive landscape
+Marabunta is not competing only with Rocket. It is competing with:
+
+GnuCOBOL itself,
+cloud mainframe modernization services,
+migration/replatforming vendors such as LzLabs, Astadia, CloudFrame,
+traditional batch scheduling and grid tools,
+in-house offload projects using Linux on Z or cloud VMs.
+The differentiator — leaderless mesh offload with COBOL-native semantics and a custom runtime — is interesting but unproven.
+
+7. Final verdict
+Dimension	Assessment
+Technical concept	Coherent and improved
+Feasibility of scoped MVP	Moderate
+Feasibility as full product	Low to moderate
+COBOL runtime replacement	High risk, high effort
+Mesh component	Moderate risk if private and scoped
+Python/Fortran bridges	Most feasible
+Licensing posture	Directionally correct, legally unresolved
+Market pain	Real
+Competitive advantage	Potential but unproven
+Enterprise adoption readiness	Low without parity and reference proofs
+Spec completeness	Vision strong, interface specification weak
+Overall
+v3.3 is a credible vision document, no longer a moonshot.
+
+But it is still not an implementable specification, because the exact COBOL subset, data contract, mesh security model, and cambrian_cobol/libcob ABI boundary are not defined.
+
+The next most valuable artifact would be a Minimum Viable COBOL Specification that says, bullet by bullet:
+
+which COBOL verbs are supported,
+which numeric types are supported,
+what loop shapes can be offloaded,
+what the data contract file looks like,
+what symbol/ABI the generated code must satisfy,
+how parity testing is performed.
+If that document can be written in two pages, the product is feasible. If it starts growing into hundreds of pages, the scope is still too broad for the current team.
+
+
