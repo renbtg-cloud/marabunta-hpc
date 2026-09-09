@@ -4,6 +4,7 @@
 * **Target Architecture:** Rust / C11 / POSIX Compliant Runtimes, Linked via Clean-Room Static/Dynamic Object Harnesses (Zero `-lcob` Dependency).
 * **Preferred Implementation Language:** Rust (with C-language only where 100% necessary for FFI memory layout alignment)
 * **Component Owner:** Cambrian Radiation Core Engineering
+* Annexes giving more detail on this spec file are named like cambrian_cobol_annex-*.md
 
 ---
 
